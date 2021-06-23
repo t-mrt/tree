@@ -1,6 +1,9 @@
 package bptree2
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 const nonLeadNodeOrder = 7
 const margin = 1
@@ -9,8 +12,13 @@ const nonLeadNodeSize = nonLeadNodeOrder + margin
 const leadNodeSize = 5 + margin
 
 type childNode interface {
-	insert(key string) *keyChild
-	find(key string) string
+	Insert(key string) *keyChild
+	Find(key string) string
+	NeedLock() bool // this method is for parent
+	RLock()
+	RUnlock()
+	Lock()
+	Unlock()
 }
 
 type keyChild struct {
@@ -25,10 +33,12 @@ type keyData struct {
 
 type nonLeafNode struct {
 	pairs [nonLeadNodeSize]*keyChild
+	mu    sync.RWMutex
 }
 
 type leafNode struct {
 	pairs [leadNodeSize]*keyData
+	mu    sync.RWMutex
 }
 
 type BPTree struct {
@@ -55,7 +65,8 @@ func New() *BPTree {
 
 func (bpt *BPTree) Insert(key string) {
 
-	p := bpt.root.insert(key)
+	bpt.root.Lock()
+	p := bpt.root.Insert(key)
 
 	if p != nil {
 		n := &nonLeafNode{
@@ -71,11 +82,12 @@ func (bpt *BPTree) Insert(key string) {
 }
 
 func (bpt *BPTree) Find(key string) string {
+	bpt.root.RLock()
 
-	return bpt.root.find(key)
+	return bpt.root.Find(key)
 }
 
-func (n *nonLeafNode) insert(key string) *keyChild {
+func (n *nonLeafNode) Insert(key string) *keyChild {
 
 	var node childNode
 	for _, v := range n.pairs {
@@ -87,7 +99,17 @@ func (n *nonLeafNode) insert(key string) *keyChild {
 		}
 		node = v.child
 	}
-	p := node.insert(key)
+
+	node.Lock()
+
+	if node.NeedLock() {
+		defer n.Unlock()
+	} else {
+		// technically, we need to release all the locks on the ancestors.
+		n.Unlock()
+	}
+
+	p := node.Insert(key)
 
 	if p != nil {
 		for i, v := range n.pairs {
@@ -106,7 +128,7 @@ func (n *nonLeafNode) insert(key string) *keyChild {
 	return n.split()
 }
 
-func (n *nonLeafNode) find(key string) string {
+func (n *nonLeafNode) Find(key string) string {
 
 	var node childNode
 
@@ -126,16 +148,16 @@ func (n *nonLeafNode) find(key string) string {
 			break
 		}
 	}
+	node.RLock()
+	n.RUnlock()
 
-	return node.find(key)
+	return node.Find(key)
 }
 
 func (n *nonLeafNode) split() *keyChild {
 
-	for _, v := range n.pairs {
-		if v == nil {
-			return nil
-		}
+	if n.needSplit() {
+		return nil
 	}
 
 	leftNode := n
@@ -161,9 +183,49 @@ func (n *nonLeafNode) split() *keyChild {
 	return p
 }
 
-func (n *leafNode) insert(key string) *keyChild {
+func (n *nonLeafNode) needSplit() bool {
+	for _, v := range n.pairs {
+		if v == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (n *nonLeafNode) NeedLock() bool {
+
+	oc := 0
+	for _, v := range n.pairs {
+		if v == nil {
+			break
+		}
+		oc++
+	}
+	return oc == nonLeadNodeSize-1
+}
+
+func (n *leafNode) Find(key string) string {
+
+	defer n.RUnlock()
+
+	for _, v := range n.pairs {
+		if v == nil {
+			return ""
+		}
+		if v.key == key {
+			return v.data
+		}
+	}
+
+	return ""
+}
+
+func (n *leafNode) Insert(key string) *keyChild {
+
+	defer n.Unlock()
+
 	for i, v := range n.pairs {
-		// first insert
+		// first Insert
 		if v == nil {
 			n.pairs[i] = &keyData{
 				key:  key,
@@ -185,10 +247,8 @@ func (n *leafNode) insert(key string) *keyChild {
 
 func (n *leafNode) split() *keyChild {
 
-	for _, v := range n.pairs {
-		if v == nil {
-			return nil
-		}
+	if n.needSplit() {
+		return nil
 	}
 
 	leftNode := n
@@ -210,16 +270,49 @@ func (n *leafNode) split() *keyChild {
 	return p
 }
 
-func (n *leafNode) find(key string) string {
-
+func (n *leafNode) needSplit() bool {
 	for _, v := range n.pairs {
 		if v == nil {
-			return ""
-		}
-		if v.key == key {
-			return v.data
+			return true
 		}
 	}
+	return false
+}
 
-	return ""
+func (n *leafNode) NeedLock() bool {
+
+	oc := 0
+	for _, v := range n.pairs {
+		if v == nil {
+			break
+		}
+		oc++
+	}
+	return oc == leadNodeSize-1
+}
+
+func (n *leafNode) RLock() {
+	n.mu.RLock()
+}
+func (n *leafNode) Lock() {
+	n.mu.Lock()
+}
+func (n *leafNode) RUnlock() {
+	n.mu.RUnlock()
+}
+func (n *leafNode) Unlock() {
+	n.mu.Unlock()
+}
+
+func (n *nonLeafNode) RLock() {
+	n.mu.RLock()
+}
+func (n *nonLeafNode) Lock() {
+	n.mu.Lock()
+}
+func (n *nonLeafNode) RUnlock() {
+	n.mu.RUnlock()
+}
+func (n *nonLeafNode) Unlock() {
+	n.mu.Unlock()
 }
